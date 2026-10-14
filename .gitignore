@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 logs/
+
+# Go build output
+producer-go/producer-go

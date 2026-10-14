@@ -3,7 +3,8 @@
 #
 #   docker compose up -d postgres kafka airflow        # batch + scheduling
 #   docker compose --profile stream up -d spark-stream # streaming alerts
-#   docker compose --profile replay run --rm producer  # replay PaySim into Kafka
+#   docker compose --profile replay run --rm producer  # replay PaySim into Kafka (Python)
+#   docker compose --profile replay-go run --rm producer-go  # same replay, Go producer
 
 x-airflow-env: &airflow-env
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -96,6 +97,15 @@ services:
       - ./data:/data
     working_dir: /app
     command: sh -c "pip install -q kafka-python-ng==2.2.3 && python replay.py --csv /data/raw/paysim.csv"
+
+  producer-go:
+    profiles: ["replay-go"]
+    build: ./producer-go
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+    volumes:
+      - ./data:/data:ro
+    command: ["-csv", "/data/raw/paysim.csv", "-brokers", "kafka:29092"]
 
 volumes:
   pgdata:

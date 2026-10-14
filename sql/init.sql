@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     dest_id     TEXT,
     amount      NUMERIC(18,2),
     is_fraud    INT,          -- ground-truth label, used only to score rule precision/recall
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (txn_id, rule)  -- makes replayed micro-batches idempotent
 );
 
 CREATE TABLE IF NOT EXISTS stream_metrics (
@@ -39,5 +40,6 @@ CREATE TABLE IF NOT EXISTS stream_metrics (
     txn_type     TEXT      NOT NULL,
     txn_count    BIGINT    NOT NULL,
     total_amount NUMERIC(18,2),
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (window_start, txn_type)  -- upsert target for replayed micro-batches
 );

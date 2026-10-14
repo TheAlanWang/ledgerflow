@@ -96,9 +96,43 @@ def window_metrics(events: DataFrame) -> DataFrame:
     )
 
 
+# Upsert SQL per sink. foreachBatch is at-least-once: if the job stops after writing a batch but
+# before committing its checkpoint, that batch is replayed on restart. Writing through a staging
+# table + ON CONFLICT makes the replay a no-op, so results are effectively exactly-once.
+UPSERT = {
+    "alerts": (
+        "INSERT INTO alerts (txn_id, event_ts, rule, txn_type, account_id, dest_id, amount, is_fraud) "
+        "SELECT txn_id, event_ts, rule, txn_type, account_id, dest_id, amount, is_fraud FROM {staging} "
+        "ON CONFLICT (txn_id, rule) DO NOTHING"
+    ),
+    "stream_metrics": (
+        "INSERT INTO stream_metrics (window_start, window_end, txn_type, txn_count, total_amount) "
+        "SELECT window_start, window_end, txn_type, txn_count, total_amount FROM {staging} "
+        "ON CONFLICT (window_start, txn_type) DO UPDATE SET "
+        "txn_count = EXCLUDED.txn_count, total_amount = EXCLUDED.total_amount, window_end = EXCLUDED.window_end"
+    ),
+}
+
+
+def run_sql(spark: SparkSession, sql: str) -> None:
+    """Execute one statement over JDBC from the driver (the Spark image has no psycopg2)."""
+    jvm = spark.sparkContext._jvm
+    conn = jvm.java.sql.DriverManager.getConnection(DB["url"], DB["user"], DB["password"])
+    try:
+        stmt = conn.createStatement()
+        stmt.executeUpdate(sql)
+        stmt.close()
+    finally:
+        conn.close()
+
+
 def write_table(df: DataFrame, table: str, name: str):
+    staging = f"{table}_staging"
+
     def to_postgres(batch_df: DataFrame, _batch_id: int) -> None:
-        batch_df.write.format("jdbc").options(dbtable=table, **DB).mode("append").save()
+        # 1) overwrite a per-sink staging table with this micro-batch, 2) upsert into the target.
+        batch_df.write.format("jdbc").options(dbtable=staging, **DB).mode("overwrite").save()
+        run_sql(batch_df.sparkSession, UPSERT[table].format(staging=staging))
 
     return (
         df.writeStream.queryName(name).foreachBatch(to_postgres)

@@ -3,7 +3,7 @@
 Batch + streaming pipeline for payment transactions, running locally on Docker.
 
 ```
-PaySim CSV ─► producer ─► Kafka ─► Spark Structured Streaming ─► Postgres.alerts      (stream)
+PaySim CSV ─► producer (Go or Python) ─► Kafka ─► Spark Structured Streaming ─► Postgres.alerts      (stream)
       └──────────────────► Airflow @daily ─► Spark batch job ─► Parquet + Postgres.daily_summary   (batch)
 ```
 
@@ -20,7 +20,8 @@ For a quick smoke test without Kaggle: `python scripts/make_sample.py` (20K synt
 docker compose up -d --build postgres kafka airflow   # Airflow UI: http://localhost:8080 (password in `docker compose logs airflow`)
 docker compose exec airflow airflow dags backfill ledgerflow_daily -s 2026-01-01 -e 2026-01-31
 docker compose --profile stream up -d spark-stream
-docker compose --profile replay run --rm producer
+docker compose --profile replay-go run --rm producer-go   # Go producer (fast)
+docker compose --profile replay run --rm producer         # Python producer
 docker compose exec postgres psql -U ledger -c "select * from daily_summary order by txn_date limit 10;"
 ```
 
@@ -30,7 +31,9 @@ Postgres is published on **localhost:55432**.
 | Layer | Result |
 |---|---|
 | Batch backfill | 31 days via Airflow, 62/62 tasks succeeded; row totals match the raw file exactly; 124/124 data-quality checks passed; ~14 s per day (~570K rows) |
-| Ingestion | 6,362,620 events replayed in 358 s (~17.8K events/s, producer-bound), **0 delivery failures** (`acks=all` + retries) |
+| Ingestion (Python) | 6,362,620 events in 358 s (~17.8K events/s), **0 delivery failures** (`acks=all` + retries) |
+| Ingestion (Go, franz-go) | 6,362,620 events in 11–16 s (**~390K–560K events/s, ~22–30× faster**), 0 delivery failures, idempotent producer; identical events, so alerts and scores match the Python run exactly |
+| Crash recovery | streaming job `docker kill`ed halfway (3.25M rows windowed), restarted from checkpoint → **6,362,612 windowed rows and 12,192 alerts, zero duplicates**, identical to an uninterrupted run |
 | Stream rules | median **235K rows/s** processed per micro-batch (peak 329K); windowed metrics ~1.2 s per batch (p90 1.2 s) |
 | Rule quality | **precision 98.7%, recall 99.4%** (8,272 alerts, 8,166 true fraud of 8,213); identical to the offline analysis |
 
@@ -52,9 +55,13 @@ Analysis with PySpark found two reconciliation-style signals, which are the ship
 
 **Caveat:** these signals are partly artifacts of how the PaySim simulator models fraudsters (they always take the full balance) and of its destination bookkeeping. Real-world fraud would not be this clean; the point of the project is the pipeline and the data-driven iteration, not the rule itself.
 
+## Producers
+- `producer/replay.py` (Python, kafka-python-ng) and `producer-go/` (Go, franz-go) emit the **same schema, keys, and event-time scheme**; `producer-go/main_test.go` checks that the JSON fields match the Python producer one-for-one. With the Go producer, ingestion is no longer the bottleneck and Spark becomes the limiting stage.
+
 ## Bugs found during the full-data run
 - **735 events lost** with fire-and-forget producing (`acks=1`, no retries) when the laptop slept mid-run → switched to `acks=all`, retries, `max_in_flight=1`, and a delivery-failure counter → 0 lost.
 - **~440K events dropped as late data** because synthetic in-hour timestamps used `sent % 3600` and wrapped backwards → made timestamps monotonic within each hour (50 ms apart) → all but the final open window counted.
+- **Duplicate rows after a streaming restart**: `foreachBatch` is at-least-once, so a batch written to Postgres just before the checkpoint commit was replayed on restart and appended twice (+15,920 windowed rows) → sinks now write to a staging table and upsert into tables with primary keys (`ON CONFLICT`), making replays no-ops (verified with a mid-stream `docker kill`).
 - **A backfilled day was silently skipped**: Airflow backfill skips dates already marked successful (left over from a smoke test) even after the downstream tables were truncated → re-ran with `--reset-dagruns`.
 
 ## Notes
