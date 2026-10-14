@@ -1,0 +1,2 @@
+step,type,amount,nameOrig,oldbalanceOrg,newbalanceOrig,nameDest,oldbalanceDest,newbalanceDest,isFraud,isFlaggedFraud
+83,PAYMENT,1.0,C_NUDGE3,0,0,M9,0,0,0,0
